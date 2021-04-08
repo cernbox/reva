@@ -42,6 +42,11 @@ func (h *Handler) createUserShare(w http.ResponseWriter, r *http.Request, statIn
 		return
 	}
 
+	if statInfo.Type == provider.ResourceType_RESOURCE_TYPE_FILE {
+		response.WriteOCSError(w, r, http.StatusNotImplemented, "File sharing not supported", nil)
+		return
+	}
+
 	shareWith := r.FormValue("shareWith")
 	if shareWith == "" {
 		response.WriteOCSError(w, r, response.MetaBadRequest.StatusCode, "missing shareWith", nil)
