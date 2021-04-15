@@ -26,11 +26,14 @@ import (
 	"net/url"
 	"os"
 	"path"
+	"path/filepath"
 	"regexp"
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 
+	"github.com/bluele/gcache"
 	grouppb "github.com/cs3org/go-cs3apis/cs3/identity/group/v1beta1"
 	userpb "github.com/cs3org/go-cs3apis/cs3/identity/user/v1beta1"
 	rpc "github.com/cs3org/go-cs3apis/cs3/rpc/v1beta1"
@@ -118,16 +121,26 @@ func (c *Config) init() {
 		c.UserLayout = "{{.Username}}" // TODO set better layout
 	}
 
+	if c.ResourceInfoCacheSize == 0 {
+		c.ResourceInfoCacheSize = 1000000
+	}
+
+	if c.ResourceInfoCacheTTL == 0 {
+		c.ResourceInfoCacheTTL = 86400
+	}
+
 	c.GatewaySvc = sharedconf.GetGatewaySVC(c.GatewaySvc)
 }
 
 type eosfs struct {
-	c             eosclient.EOSClient
-	conf          *Config
-	chunkHandler  *chunking.ChunkHandler
-	singleUserUID string
-	singleUserGID string
-	userIDCache   sync.Map
+	c                    eosclient.EOSClient
+	conf                 *Config
+	chunkHandler         *chunking.ChunkHandler
+	singleUserUID        string
+	singleUserGID        string
+	userIDCache          sync.Map
+	resourceInfoCache    gcache.Cache
+	resourceInfoCacheTTL time.Duration
 }
 
 // NewEOSFS returns a storage.FS interface implementation that connects to an EOS instance
@@ -175,10 +188,12 @@ func NewEOSFS(c *Config) (storage.FS, error) {
 	}
 
 	eosfs := &eosfs{
-		c:            eosClient,
-		conf:         c,
-		chunkHandler: chunking.NewChunkHandler(c.CacheDirectory),
-		userIDCache:  sync.Map{},
+		c:                    eosClient,
+		conf:                 c,
+		chunkHandler:         chunking.NewChunkHandler(c.CacheDirectory),
+		userIDCache:          sync.Map{},
+		resourceInfoCache:    gcache.New(c.ResourceInfoCacheSize).LFU().Build(),
+		resourceInfoCacheTTL: time.Duration(c.ResourceInfoCacheTTL),
 	}
 
 	return eosfs, nil
@@ -661,6 +676,17 @@ func (fs *eosfs) listWithNominalHome(ctx context.Context, p string) (finfos []*p
 	}
 
 	fn := fs.wrap(ctx, p)
+	if !fs.conf.EnableHome {
+		// EOS file systems are usually sharded with a /username-first-letter/username/resource-path layout
+		// So if the list request is for the first element of this path, it is likely that we're generating
+		// a virtual view. In that case, use cached values as this can be take a long time.
+		rel, err := filepath.Rel(fs.conf.Namespace, fn)
+		if err != nil && rel == filepath.Dir(fn) {
+			if infoIf, err := fs.resourceInfoCache.Get(fn); err == nil {
+				return infoIf.([]*provider.ResourceInfo), nil
+			}
+		}
+	}
 
 	eosFileInfos, err := fs.c.List(ctx, uid, gid, fn)
 	if err != nil {
@@ -683,6 +709,7 @@ func (fs *eosfs) listWithNominalHome(ctx context.Context, p string) (finfos []*p
 			finfos = append(finfos, finfo)
 		}
 	}
+	_ = fs.resourceInfoCache.SetWithExpire(fn, finfos, time.Second*fs.resourceInfoCacheTTL)
 
 	return finfos, nil
 }

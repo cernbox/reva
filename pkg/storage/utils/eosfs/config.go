@@ -111,4 +111,12 @@ type Config struct {
 	// URI of the EOS MGM grpc server
 	// Default is empty
 	GrpcURI string `mapstructure:"master_grpc_uri"`
+
+	// The size of the cache used to store resource infos
+	// Default is 1000000
+	ResourceInfoCacheSize int `mapstructure:"resource_info_cache_size"`
+
+	// The TTL of the resource info cache in seconds
+	// Default is 86400 seconds (1 day)
+	ResourceInfoCacheTTL int `mapstructure:"resource_info_cache_ttl"`
 }
