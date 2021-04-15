@@ -187,7 +187,7 @@ func (h *Handler) listUserShares(r *http.Request, filters []*collaboration.ListS
 			var info *provider.ResourceInfo
 			key := wrapResourceID(s.ResourceId)
 			if infoIf, err := h.resourceInfoCache.Get(key); err == nil {
-				log.Debug().Msgf("cache hit for resource %+v", s.ResourceId)
+				log.Debug().Msg("cache hit for resource " + s.ResourceId.String())
 				info = infoIf.(*provider.ResourceInfo)
 			} else {
 				// prepare the stat request

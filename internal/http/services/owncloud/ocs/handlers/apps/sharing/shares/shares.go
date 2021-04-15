@@ -400,7 +400,7 @@ func (h *Handler) getShare(w http.ResponseWriter, r *http.Request, shareID strin
 	var info *provider.ResourceInfo
 	key := wrapResourceID(resourceID)
 	if infoIf, err := h.resourceInfoCache.Get(key); err == nil {
-		logger.Debug().Msgf("cache hit for resource %+v", resourceID)
+		logger.Debug().Msg("cache hit for resource " + resourceID.String())
 		info = infoIf.(*provider.ResourceInfo)
 	} else {
 		// prepare the stat request
@@ -610,7 +610,7 @@ func (h *Handler) listSharesWithMe(w http.ResponseWriter, r *http.Request) {
 		target := path.Join(h.homeNamespace, r.FormValue("path"))
 
 		if infoIf, err := h.resourceInfoCache.Get(target); err == nil {
-			logger.Debug().Msgf("cache hit for resource %+v", target)
+			logger.Debug().Msg("cache hit for resource " + target)
 			pinfo = infoIf.(*provider.ResourceInfo)
 		} else {
 			statReq := &provider.StatRequest{
@@ -682,7 +682,7 @@ func (h *Handler) listSharesWithMe(w http.ResponseWriter, r *http.Request) {
 		} else {
 			key := wrapResourceID(rs.Share.ResourceId)
 			if infoIf, err := h.resourceInfoCache.Get(key); err == nil {
-				logger.Debug().Msgf("cache hit for resource %+v", rs.Share.ResourceId)
+				logger.Debug().Msg("cache hit for resource " + rs.Share.ResourceId.String())
 				info = infoIf.(*provider.ResourceInfo)
 			} else {
 				// we need to do a stat call

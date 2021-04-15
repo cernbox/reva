@@ -25,7 +25,6 @@ import (
 	"path"
 	"path/filepath"
 	"strings"
-	"sync"
 	"time"
 
 	gateway "github.com/cs3org/go-cs3apis/cs3/gateway/v1beta1"
@@ -1064,25 +1063,16 @@ func (s *svc) stat(ctx context.Context, req *provider.StatRequest) (*provider.St
 }
 
 func (s *svc) statAcrossProviders(ctx context.Context, req *provider.StatRequest, providers []*registry.ProviderInfo) (*provider.StatResponse, error) {
-	infoFromProviders := make([]*provider.ResourceInfo, len(providers))
-	errors := make([]error, len(providers))
-	var wg sync.WaitGroup
-
-	for i, p := range providers {
-		wg.Add(1)
-		go s.statOnProvider(ctx, req, infoFromProviders[i], p, &errors[i], &wg)
-	}
-	wg.Wait()
-
 	var totalSize uint64
-	for i := range providers {
-		if errors[i] != nil {
+	for _, p := range providers {
+		info, err := s.statOnProvider(ctx, req.Ref.GetPath(), p)
+		if err != nil {
 			log := appctx.GetLogger(ctx)
-			log.Warn().Msgf("statting on provider %s returned err %+v", providers[i].ProviderPath, errors[i])
+			log.Warn().Msgf("statting on provider %s returned err %+v", p.ProviderPath, err)
 			continue
 		}
-		if infoFromProviders[i] != nil {
-			totalSize += infoFromProviders[i].Size
+		if info != nil {
+			totalSize += info.Size
 		}
 	}
 
@@ -1101,16 +1091,14 @@ func (s *svc) statAcrossProviders(ctx context.Context, req *provider.StatRequest
 	}, nil
 }
 
-func (s *svc) statOnProvider(ctx context.Context, req *provider.StatRequest, res *provider.ResourceInfo, p *registry.ProviderInfo, e *error, wg *sync.WaitGroup) {
-	defer wg.Done()
+func (s *svc) statOnProvider(ctx context.Context, statPath string, p *registry.ProviderInfo) (*provider.ResourceInfo, error) {
 	c, err := s.getStorageProviderClient(ctx, p)
 	if err != nil {
-		*e = errors.Wrap(err, "error connecting to storage provider="+p.Address)
-		return
+		return nil, errors.Wrap(err, "error connecting to storage provider="+p.Address)
 	}
 
-	resPath := path.Clean(req.Ref.GetPath())
-	newPath := req.Ref.GetPath()
+	resPath := path.Clean(statPath)
+	newPath := statPath
 	if resPath != "" && !strings.HasPrefix(resPath, p.ProviderPath) {
 		newPath = p.ProviderPath
 	}
@@ -1122,13 +1110,10 @@ func (s *svc) statOnProvider(ctx context.Context, req *provider.StatRequest, res
 		},
 	})
 	if err != nil {
-		*e = errors.Wrap(err, fmt.Sprintf("gateway: error calling Stat %s: %+v", newPath, p))
-		return
+		return nil, errors.Wrap(err, "gateway: error calling ListContainer")
 	}
-	if res == nil {
-		res = &provider.ResourceInfo{}
-	}
-	*res = *r.Info
+
+	return r.Info, nil
 }
 
 func (s *svc) Stat(ctx context.Context, req *provider.StatRequest) (*provider.StatResponse, error) {
@@ -1349,33 +1334,23 @@ func (s *svc) listContainer(ctx context.Context, req *provider.ListContainerRequ
 		}, nil
 	}
 
-	infoFromProviders := make([][]*provider.ResourceInfo, len(providers))
-	errors := make([]error, len(providers))
-	indirects := make([]bool, len(providers))
-	var wg sync.WaitGroup
-
-	for i, p := range providers {
-		wg.Add(1)
-		go s.listContainerOnProvider(ctx, req, &infoFromProviders[i], p, &indirects[i], &errors[i], &wg)
-	}
-	wg.Wait()
-
 	infos := []*provider.ResourceInfo{}
 	nestedInfos := make(map[string][]*provider.ResourceInfo)
-	for i := range providers {
-		if errors[i] != nil {
+	for _, p := range providers {
+		rInfos, indirect, err := s.listContainerOnProvider(ctx, req, p)
+		if err != nil {
 			// return if there's only one mount, else skip this one
 			if len(providers) == 1 {
 				return &provider.ListContainerResponse{
-					Status: status.NewStatusFromErrType(ctx, "listContainer ref: "+req.Ref.String(), errors[i]),
+					Status: status.NewStatusFromErrType(ctx, "listContainer ref: "+req.Ref.String(), err),
 				}, nil
 			}
 			log := appctx.GetLogger(ctx)
-			log.Warn().Msgf("listing container on provider %s returned err %+v", providers[i].ProviderPath, errors[i])
+			log.Warn().Msgf("listing container on provider %s returned err %+v", p.ProviderPath, err)
 			continue
 		}
-		for _, inf := range infoFromProviders[i] {
-			if indirects[i] {
+		for _, inf := range rInfos {
+			if indirect {
 				p := inf.Path
 				nestedInfos[p] = append(nestedInfos[p], inf)
 			} else {
@@ -1403,12 +1378,10 @@ func (s *svc) listContainer(ctx context.Context, req *provider.ListContainerRequ
 	}, nil
 }
 
-func (s *svc) listContainerOnProvider(ctx context.Context, req *provider.ListContainerRequest, res *[]*provider.ResourceInfo, p *registry.ProviderInfo, ind *bool, e *error, wg *sync.WaitGroup) {
-	defer wg.Done()
+func (s *svc) listContainerOnProvider(ctx context.Context, req *provider.ListContainerRequest, p *registry.ProviderInfo) ([]*provider.ResourceInfo, bool, error) {
 	c, err := s.getStorageProviderClient(ctx, p)
 	if err != nil {
-		*e = errors.Wrap(err, "error connecting to storage provider="+p.Address)
-		return
+		return nil, false, errors.Wrap(err, "error connecting to storage provider="+p.Address)
 	}
 
 	resPath := path.Clean(req.Ref.GetPath())
@@ -1417,13 +1390,11 @@ func (s *svc) listContainerOnProvider(ctx context.Context, req *provider.ListCon
 		// so just return the first child and mark it as indirect
 		rel, err := filepath.Rel(resPath, p.ProviderPath)
 		if err != nil {
-			*e = err
-			return
+			return nil, false, err
 		}
 		parts := strings.Split(rel, "/")
 		p := path.Join(resPath, parts[0])
-		*ind = true
-		*res = []*provider.ResourceInfo{
+		return []*provider.ResourceInfo{
 			&provider.ResourceInfo{
 				Id: &provider.ResourceId{
 					StorageId: "/",
@@ -1433,15 +1404,16 @@ func (s *svc) listContainerOnProvider(ctx context.Context, req *provider.ListCon
 				Path: p,
 				Size: 0,
 			},
-		}
-		return
+		}, true, nil
 	}
 	r, err := c.ListContainer(ctx, req)
 	if err != nil {
-		*e = errors.Wrap(err, "gateway: error calling ListContainer")
-		return
+		return nil, false, errors.Wrap(err, "gateway: error calling ListContainer")
 	}
-	*res = r.Infos
+	if r.Status.Code != rpc.Code_CODE_OK {
+		return nil, false, status.NewErrorFromCode(r.Status.Code, "gateway")
+	}
+	return r.Infos, false, nil
 }
 
 func (s *svc) ListContainer(ctx context.Context, req *provider.ListContainerRequest) (*provider.ListContainerResponse, error) {

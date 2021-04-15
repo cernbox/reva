@@ -164,7 +164,7 @@ func (h *Handler) listPublicShares(r *http.Request, filters []*link.ListPublicSh
 		for _, share := range res.GetShare() {
 			key := wrapResourceID(share.ResourceId)
 			if infoIf, err := h.resourceInfoCache.Get(key); err == nil {
-				log.Debug().Msgf("cache hit for resource %+v", share.ResourceId)
+				log.Debug().Msg("cache hit for resource " + share.ResourceId.String())
 				info = infoIf.(*provider.ResourceInfo)
 			} else {
 				statRequest := &provider.StatRequest{
