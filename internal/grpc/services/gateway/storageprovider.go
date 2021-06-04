@@ -25,7 +25,6 @@ import (
 	"path"
 	"path/filepath"
 	"strings"
-	"sync"
 	"time"
 
 	gateway "github.com/cs3org/go-cs3apis/cs3/gateway/v1beta1"
@@ -1066,13 +1065,12 @@ func (s *svc) stat(ctx context.Context, req *provider.StatRequest) (*provider.St
 func (s *svc) statAcrossProviders(ctx context.Context, req *provider.StatRequest, providers []*registry.ProviderInfo) (*provider.StatResponse, error) {
 	infoFromProviders := make([]*provider.ResourceInfo, len(providers))
 	errors := make([]error, len(providers))
-	var wg sync.WaitGroup
 
 	for i, p := range providers {
-		wg.Add(1)
-		go s.statOnProvider(ctx, req, infoFromProviders[i], p, &errors[i], &wg)
+		r, e := s.statOnProvider(ctx, req, p)
+		infoFromProviders[i] = r
+		errors[i] = e
 	}
-	wg.Wait()
 
 	var totalSize uint64
 	for i := range providers {
@@ -1101,12 +1099,11 @@ func (s *svc) statAcrossProviders(ctx context.Context, req *provider.StatRequest
 	}, nil
 }
 
-func (s *svc) statOnProvider(ctx context.Context, req *provider.StatRequest, res *provider.ResourceInfo, p *registry.ProviderInfo, e *error, wg *sync.WaitGroup) {
-	defer wg.Done()
+func (s *svc) statOnProvider(ctx context.Context, req *provider.StatRequest, p *registry.ProviderInfo) (*provider.ResourceInfo, error) {
 	c, err := s.getStorageProviderClient(ctx, p)
 	if err != nil {
-		*e = errors.Wrap(err, "error connecting to storage provider="+p.Address)
-		return
+		e := errors.Wrap(err, "error connecting to storage provider="+p.Address)
+		return nil, e
 	}
 
 	resPath := path.Clean(req.Ref.GetPath())
@@ -1122,13 +1119,10 @@ func (s *svc) statOnProvider(ctx context.Context, req *provider.StatRequest, res
 		},
 	})
 	if err != nil {
-		*e = errors.Wrap(err, fmt.Sprintf("gateway: error calling Stat %s: %+v", newPath, p))
-		return
+		e := errors.Wrap(err, fmt.Sprintf("gateway: error calling Stat %s: %+v", newPath, p))
+		return nil, e
 	}
-	if res == nil {
-		res = &provider.ResourceInfo{}
-	}
-	*res = *r.Info
+	return r.Info, nil
 }
 
 func (s *svc) Stat(ctx context.Context, req *provider.StatRequest) (*provider.StatResponse, error) {
@@ -1352,13 +1346,10 @@ func (s *svc) listContainer(ctx context.Context, req *provider.ListContainerRequ
 	infoFromProviders := make([][]*provider.ResourceInfo, len(providers))
 	errors := make([]error, len(providers))
 	indirects := make([]bool, len(providers))
-	var wg sync.WaitGroup
 
 	for i, p := range providers {
-		wg.Add(1)
-		go s.listContainerOnProvider(ctx, req, &infoFromProviders[i], p, &indirects[i], &errors[i], &wg)
+		s.listContainerOnProvider(ctx, req, &infoFromProviders[i], p, &indirects[i], &errors[i])
 	}
-	wg.Wait()
 
 	infos := []*provider.ResourceInfo{}
 	nestedInfos := make(map[string][]*provider.ResourceInfo)
@@ -1403,8 +1394,7 @@ func (s *svc) listContainer(ctx context.Context, req *provider.ListContainerRequ
 	}, nil
 }
 
-func (s *svc) listContainerOnProvider(ctx context.Context, req *provider.ListContainerRequest, res *[]*provider.ResourceInfo, p *registry.ProviderInfo, ind *bool, e *error, wg *sync.WaitGroup) {
-	defer wg.Done()
+func (s *svc) listContainerOnProvider(ctx context.Context, req *provider.ListContainerRequest, res *[]*provider.ResourceInfo, p *registry.ProviderInfo, ind *bool, e *error) {
 	c, err := s.getStorageProviderClient(ctx, p)
 	if err != nil {
 		*e = errors.Wrap(err, "error connecting to storage provider="+p.Address)
