@@ -24,12 +24,15 @@ import (
 	"fmt"
 
 	userpb "github.com/cs3org/go-cs3apis/cs3/identity/user/v1beta1"
+	rpc "github.com/cs3org/go-cs3apis/cs3/rpc/v1beta1"
 	provider "github.com/cs3org/go-cs3apis/cs3/storage/provider/v1beta1"
-	types "github.com/cs3org/go-cs3apis/cs3/types/v1beta1"
+	"github.com/cs3org/reva/pkg/auth/scope"
+	"github.com/cs3org/reva/pkg/errtypes"
+	"github.com/cs3org/reva/pkg/rgrpc/todo/pool"
 	"github.com/cs3org/reva/pkg/share/cache"
 	"github.com/cs3org/reva/pkg/share/cache/registry"
-	"github.com/cs3org/reva/pkg/storage/fs/eos"
-	"github.com/cs3org/reva/pkg/user"
+	tokenpkg "github.com/cs3org/reva/pkg/token"
+	tokenreg "github.com/cs3org/reva/pkg/token/manager/registry"
 	"github.com/mitchellh/mapstructure"
 	"github.com/pkg/errors"
 
@@ -49,11 +52,13 @@ type config struct {
 	DbName       string `mapstructure:"db_name"`
 	EOSNamespace string `mapstructure:"namespace"`
 	GatewaySvc   string `mapstructure:"gatewaysvc"`
+	JwtSecret    string `mapstrcuture:"jwt_secret"`
 }
 
 type manager struct {
-	conf *config
-	db   *sql.DB
+	conf     *config
+	db       *sql.DB
+	tokenMgr tokenpkg.Manager
 }
 
 func parseConfig(m map[string]interface{}) (*config, error) {
@@ -62,6 +67,7 @@ func parseConfig(m map[string]interface{}) (*config, error) {
 		err = errors.Wrap(err, "error decoding conf")
 		return nil, err
 	}
+	c.JwtSecret = "Pive-Fumkiu4"
 	return c, nil
 }
 
@@ -75,67 +81,84 @@ func New(m map[string]interface{}) (cache.Warmup, error) {
 	if err != nil {
 		return nil, err
 	}
+	f, ok := tokenreg.NewFuncs["jwt"]
+	if !ok {
+		return nil, errtypes.NotFound("auth: jwt token manager does not exist")
+	}
+	mgr, err := f(map[string]interface{}{"secret": c.JwtSecret})
+	if err != nil {
+		return nil, err
+	}
 
 	return &manager{
-		conf: c,
-		db:   db,
+		conf:     c,
+		db:       db,
+		tokenMgr: mgr,
 	}, nil
 }
 
 func (m *manager) GetResourceInfos() ([]*provider.ResourceInfo, error) {
-	query := "select coalesce(fileid_prefix, '') as fileid_prefix, coalesce(item_source, '') as item_source FROM oc_share WHERE (orphan = 0 or orphan IS NULL)"
+	query := "select coalesce(fileid_prefix, '') as fileid_prefix, coalesce(item_source, '') as item_source FROM oc_share WHERE (orphan = 0 or orphan IS NULL) limit 10"
 	rows, err := m.db.Query(query)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
 
+	s, err := scope.GetOwnerScope()
+	if err != nil {
+		return nil, err
+	}
+	u := &userpb.User{
+		Id: &userpb.UserId{
+			OpaqueId: "root",
+		},
+		UidNumber: 0,
+		GidNumber: 0,
+	}
+
+	ctx := context.Background()
+	token, err := m.tokenMgr.MintToken(ctx, u, s)
+	if err != nil {
+		return nil, err
+	}
+	ctx = tokenpkg.ContextSetToken(ctx, token)
+	//ctx = metadata.AppendToOutgoingContext(ctx, tokenpkg.TokenHeader, token)
+	client, err := pool.GetGatewayServiceClient(m.conf.GatewaySvc)
+	if err != nil {
+		return nil, err
+	}
+
+	cnt := 0
 	infos := []*provider.ResourceInfo{}
 	for rows.Next() {
+		if cnt > 10 {
+			break
+		}
+		cnt++
 		var storageID, nodeID string
 		if err := rows.Scan(&storageID, &nodeID); err != nil {
 			continue
 		}
 
-		eosOpts := map[string]interface{}{
-			"namespace":         m.conf.EOSNamespace,
-			"master_url":        fmt.Sprintf("root://%s.cern.ch", storageID),
-			"version_invariant": true,
-			"gatewaysvc":        m.conf.GatewaySvc,
-		}
-		eos, err := eos.New(eosOpts)
-		if err != nil {
-			return nil, err
-		}
-
-		ctx := user.ContextSetUser(context.Background(), &userpb.User{
-			Id: &userpb.UserId{
-				OpaqueId: "root",
-			},
-			Opaque: &types.Opaque{
-				Map: map[string]*types.OpaqueEntry{
-					"uid": &types.OpaqueEntry{
-						Decoder: "plain",
-						Value:   []byte("0"),
-					},
-					"gid": &types.OpaqueEntry{
-						Decoder: "plain",
-						Value:   []byte("0"),
-					},
-				},
-			},
-		})
-
-		inf, err := eos.GetMD(ctx, &provider.Reference{
+		ref := &provider.Reference{
 			ResourceId: &provider.ResourceId{
 				StorageId: storageID,
 				OpaqueId:  nodeID,
 			},
-		}, []string{})
+		}
+
+		statReq := provider.StatRequest{Ref: ref}
+		statRes, err := client.Stat(ctx, &statReq)
 		if err != nil {
 			return nil, err
 		}
-		infos = append(infos, inf)
+
+		if statRes.Status.Code != rpc.Code_CODE_OK {
+			return nil, errors.New(fmt.Sprintf("stat failed %+v %s", ctx, m.conf.JwtSecret))
+		}
+
+		infos = append(infos, statRes.Info)
 	}
 
 	if err = rows.Err(); err != nil {

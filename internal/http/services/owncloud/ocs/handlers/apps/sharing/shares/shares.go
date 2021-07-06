@@ -66,6 +66,7 @@ type Handler struct {
 	userIdentifierCache    *ttlcache.Cache
 	resourceInfoCache      gcache.Cache
 	resourceInfoCacheTTL   time.Duration
+	c                      *config.Config
 }
 
 // we only cache the minimal set of data instead of the full user metadata
@@ -84,6 +85,7 @@ func getCacheWarmupManager(c *config.Config) (cache.Warmup, error) {
 
 // Init initializes this and any contained handlers
 func (h *Handler) Init(c *config.Config) error {
+	h.c = c
 	h.gatewayAddr = c.GatewaySvc
 	h.publicURL = c.Config.Host
 	h.sharePrefix = c.SharePrefix
@@ -100,6 +102,7 @@ func (h *Handler) Init(c *config.Config) error {
 		cwm, err := getCacheWarmupManager(c)
 		if err == nil {
 			go h.startCacheWarmup(cwm)
+		} else {
 		}
 	}
 
@@ -107,10 +110,12 @@ func (h *Handler) Init(c *config.Config) error {
 }
 
 func (h *Handler) startCacheWarmup(c cache.Warmup) {
+	time.Sleep(4 * time.Second)
 	infos, err := c.GetResourceInfos()
 	if err != nil {
-		return
+		panic("startCacheWarmup " + err.Error())
 	}
+	panic(fmt.Sprintf("startCacheWarmup %+v", infos))
 	for _, r := range infos {
 		key := wrapResourceID(r.Id)
 		_ = h.resourceInfoCache.SetWithExpire(key, r, time.Second*h.resourceInfoCacheTTL)
@@ -948,7 +953,8 @@ func (h *Handler) getResourceInfoByID(ctx context.Context, client gateway.Gatewa
 // This method utilizes caching if it is enabled.
 func (h *Handler) getResourceInfo(ctx context.Context, client gateway.GatewayAPIClient, key string, ref *provider.Reference) (*provider.ResourceInfo, *rpc.Status, error) {
 	logger := appctx.GetLogger(ctx)
-
+	logger.Info().Msgf("h.resourceInfoCache.len %d", h.resourceInfoCache.Len(false))
+	logger.Info().Msgf("conf %+v", h.c.CacheWarmupDrivers[h.c.CacheWarmupDriver])
 	var pinfo *provider.ResourceInfo
 	var status *rpc.Status
 	if infoIf, err := h.resourceInfoCache.Get(key); h.resourceInfoCacheTTL > 0 && err == nil {
@@ -956,6 +962,7 @@ func (h *Handler) getResourceInfo(ctx context.Context, client gateway.GatewayAPI
 		pinfo = infoIf.(*provider.ResourceInfo)
 		status = &rpc.Status{Code: rpc.Code_CODE_OK}
 	} else {
+		logger.Debug().Msgf("statting resource %+v", key)
 		statReq := &provider.StatRequest{
 			Ref: ref,
 		}

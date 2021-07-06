@@ -230,11 +230,8 @@ func getUser(ctx context.Context) (*userpb.User, error) {
 		err := errors.Wrap(errtypes.UserRequired(""), "eosfs: error getting user from ctx")
 		return nil, err
 	}
-	if u.UidNumber == 0 {
-		return nil, errors.New("eosfs: invalid user id")
-	}
-	if u.GidNumber == 0 {
-		return nil, errors.New("eosfs: invalid group id")
+	if (u.UidNumber == 0 || u.GidNumber == 0) && u.Id.OpaqueId != "root" {
+		return nil, errors.New("eosfs: invalid uid/gid")
 	}
 	return u, nil
 }
@@ -1577,11 +1574,8 @@ func getResourceType(isDir bool) provider.ResourceType {
 }
 
 func (fs *eosfs) extractUIDAndGID(u *userpb.User) (string, string, error) {
-	if u.UidNumber == 0 {
-		return "", "", errors.New("eosfs: uid missing for user")
-	}
-	if u.GidNumber == 0 {
-		return "", "", errors.New("eosfs: gid missing for user")
+	if (u.UidNumber == 0 || u.GidNumber == 0) && u.Id.OpaqueId != "root" {
+		return "", "", errors.New("eosfs: uid/gid missing for user")
 	}
 	return strconv.FormatInt(u.UidNumber, 10), strconv.FormatInt(u.GidNumber, 10), nil
 }
